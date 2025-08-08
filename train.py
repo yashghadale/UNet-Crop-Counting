@@ -1,6 +1,7 @@
 import argparse
 import logging
 import os
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 import random
 import sys
 import torch
@@ -48,8 +49,10 @@ def train_model(
     train_set, val_set = random_split(dataset, [n_train, n_val], generator=torch.Generator().manual_seed(0))
 
     # 3. Create data loaders
-    loader_args = dict(batch_size=batch_size, num_workers=os.cpu_count(), pin_memory=True)
-    train_loader = DataLoader(train_set, shuffle=True, **loader_args)
+    # 3. Create data loaders
+    loader_args = dict(batch_size=batch_size, num_workers=0, pin_memory=True)
+    train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True,
+                          num_workers=2, pin_memory=True)
     val_loader = DataLoader(val_set, shuffle=False, drop_last=True, **loader_args)
 
     # (Initialize logging)
@@ -167,6 +170,7 @@ def train_model(
 
 def get_args():
     parser = argparse.ArgumentParser(description='Train the UNet on images and target masks')
+    parser.add_argument('--checkpoint', action='store_true', help='Enable gradient checkpointing to save memory')
     parser.add_argument('--epochs', '-e', metavar='E', type=int, default=5, help='Number of epochs')
     parser.add_argument('--batch-size', '-b', dest='batch_size', metavar='B', type=int, default=1, help='Batch size')
     parser.add_argument('--learning-rate', '-l', metavar='LR', type=float, default=1e-5,
@@ -192,8 +196,9 @@ if __name__ == '__main__':
     # Change here to adapt to your data
     # n_channels=3 for RGB images
     # n_classes is the number of probabilities you want to get per pixel
-    model = UNet(n_channels=3, n_classes=args.classes, bilinear=args.bilinear)
-    model = model.to(memory_format=torch.channels_last)
+    model = UNet(n_channels=3, n_classes=args.classes, bilinear=args.bilinear, use_checkpoint=args.checkpoint)
+    model = model.to(device=device, memory_format=torch.channels_last)
+
 
     logging.info(f'Network:\n'
                  f'\t{model.n_channels} input channels\n'
@@ -206,7 +211,7 @@ if __name__ == '__main__':
         model.load_state_dict(state_dict)
         logging.info(f'Model loaded from {args.load}')
 
-    model.to(device=device)
+    
     try:
         train_model(
             model=model,
@@ -218,19 +223,36 @@ if __name__ == '__main__':
             val_percent=args.val / 100,
             amp=args.amp
         )
+
     except torch.cuda.OutOfMemoryError:
         logging.error('Detected OutOfMemoryError! '
-                      'Enabling checkpointing to reduce memory usage, but this slows down training. '
-                      'Consider enabling AMP (--amp) for fast and memory efficient training')
+                          'Enabling checkpointing to reduce memory usage, but this slows down training. '
+                          'Consider enabling AMP (--amp) for fast and memory efficient training.')
+
+        # Clean up GPU memory
+        del model
         torch.cuda.empty_cache()
-        model.use_checkpointing()
+        import gc
+        gc.collect()
+
+        # Re-initialize the model with checkpointing
+        from unet.unet_model import UNet
+        model = UNet(n_channels=3, n_classes=args.classes, bilinear=args.bilinear, use_checkpoint=True)
+        model = model.to(device=device, memory_format=torch.channels_last)
+
+        # (Optional) reduce batch size
+        batch_size = max(1, args.batch_size // 4)  # 🔽 Try dividing further
+        logging.info(f'Retrying training with checkpointing and reduced batch size = {batch_size}')
+
+        # Retry training with checkpointing
         train_model(
             model=model,
             epochs=args.epochs,
-            batch_size=args.batch_size,
+            batch_size=batch_size,
             learning_rate=args.lr,
             device=device,
             img_scale=args.scale,
             val_percent=args.val / 100,
             amp=args.amp
         )
+
