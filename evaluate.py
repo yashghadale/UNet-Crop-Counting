@@ -29,11 +29,25 @@ def evaluate(net, dataloader, device, amp):
                 # compute the Dice score
                 dice_score += dice_coeff(mask_pred, mask_true, reduce_batch_first=False)
             else:
-                assert mask_true.min() >= 0 and mask_true.max() < net.n_classes, 'True mask indices should be in [0, n_classes['
-                # convert to one-hot format
-                mask_true = F.one_hot(mask_true, net.n_classes).permute(0, 3, 1, 2).float()
+                print("Prediction shape:", mask_pred.size())
+                print("Target shape:", mask_true.size())
+
+    # If mask_true has no channel dimension, add it
+                if mask_true.ndim == 3:
+                    mask_true = mask_true.unsqueeze(1)  # [B, 1, H, W]
+
+    # Check again after adding channel dimension
+                if mask_pred.size() != mask_true.size():
+                    print("Warning: Shapes still differ after adjustment")
+
+                assert mask_true.min() >= 0 and mask_true.max() < net.n_classes, \
+                    'True mask indices should be in [0, n_classes['
+
+    # Convert to one-hot format
+                mask_true = F.one_hot(mask_true.squeeze(1).long(), net.n_classes).permute(0, 3, 1, 2).float()
                 mask_pred = F.one_hot(mask_pred.argmax(dim=1), net.n_classes).permute(0, 3, 1, 2).float()
-                # compute the Dice score, ignoring background
+
+    # Compute the Dice score ignoring background
                 dice_score += multiclass_dice_coeff(mask_pred[:, 1:], mask_true[:, 1:], reduce_batch_first=False)
 
     net.train()
