@@ -13,6 +13,9 @@ from pathlib import Path
 from torch import optim
 from torch.utils.data import DataLoader, random_split
 from tqdm import tqdm
+import numpy as np
+if not hasattr(np, "float_"):  # Patch for NumPy 2.0+
+    np.float_ = np.float64
 
 import wandb
 from evaluate import evaluate
@@ -20,8 +23,13 @@ from unet import UNet
 from utils.data_loading import BasicDataset, CarvanaDataset
 from utils.dice_score import dice_loss
 
-dir_img = Path('/content/drive/MyDrive/CropCountingDataset/images/train')
-dir_mask = Path('/content/drive/MyDrive/CropCountingDataset/masks/train')
+train_img_dir = Path('/content/drive/MyDrive/CropCountingDataset/images/train')
+train_mask_dir = Path('/content/drive/MyDrive/CropCountingDataset/masks/train')
+
+# Validation folders
+val_img_dir = Path('/content/drive/MyDrive/CropCountingDataset/images/val')
+val_mask_dir = Path('/content/drive/MyDrive/CropCountingDataset/masks/val')
+
 dir_checkpoint = Path('./checkpoints/')
 
 
@@ -39,21 +47,20 @@ def train_model(
         momentum: float = 0.999,
         gradient_clipping: float = 1.0,
 ):
-    # 1. Create dataset
-    dataset = BasicDataset(dir_img, dir_mask, img_scale)
+    # Load datasets directly
+    train_set = BasicDataset(train_img_dir, train_mask_dir, img_scale)
+    val_set   = BasicDataset(val_img_dir, val_mask_dir, img_scale)
+    n_train = len(train_set)
+    n_val = len(val_set)
 
 
-    # 2. Split into train / validation partitions
-    n_val = int(len(dataset) * val_percent)
-    n_train = len(dataset) - n_val
-    train_set, val_set = random_split(dataset, [n_train, n_val], generator=torch.Generator().manual_seed(0))
 
     # 3. Create data loaders
     # 3. Create data loaders
     loader_args = dict(batch_size=batch_size, num_workers=0, pin_memory=True)
-    train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True,
-                          num_workers=2, pin_memory=True)
-    val_loader = DataLoader(val_set, shuffle=False, drop_last=True, **loader_args)
+    train_loader = DataLoader(train_set, shuffle=True, num_workers=2, pin_memory=True, batch_size=batch_size)
+    val_loader   = DataLoader(val_set, shuffle=False, drop_last=True, **loader_args)
+
 
     # (Initialize logging)
     experiment = wandb.init(project='U-Net', resume='allow', anonymous='must')
@@ -62,17 +69,21 @@ def train_model(
              val_percent=val_percent, save_checkpoint=save_checkpoint, img_scale=img_scale, amp=amp)
     )
 
-    logging.info(f'''Starting training:
+    logging.info(
+        f'''Starting training:
         Epochs:          {epochs}
         Batch size:      {batch_size}
         Learning rate:   {learning_rate}
-        Training size:   {n_train}
-        Validation size: {n_val}
+        Training size:   {len(train_set)}
+        Validation size: {len(val_set)}
         Checkpoints:     {save_checkpoint}
         Device:          {device.type}
         Images scaling:  {img_scale}
         Mixed Precision: {amp}
-    ''')
+        '''
+    )
+
+    
 
     # 4. Set up the optimizer, the loss, the learning rate scheduler and the loss scaling for AMP
     optimizer = optim.RMSprop(model.parameters(),
@@ -171,14 +182,13 @@ def train_model(
 def get_args():
     parser = argparse.ArgumentParser(description='Train the UNet on images and target masks')
     parser.add_argument('--checkpoint', action='store_true', help='Enable gradient checkpointing to save memory')
+    parser.add_argument('--val-dir', type=str, help='Path to separate validation dataset')
     parser.add_argument('--epochs', '-e', metavar='E', type=int, default=5, help='Number of epochs')
     parser.add_argument('--batch-size', '-b', dest='batch_size', metavar='B', type=int, default=1, help='Batch size')
     parser.add_argument('--learning-rate', '-l', metavar='LR', type=float, default=1e-5,
                         help='Learning rate', dest='lr')
     parser.add_argument('--load', '-f', type=str, default=False, help='Load model from a .pth file')
     parser.add_argument('--scale', '-s', type=float, default=0.5, help='Downscaling factor of the images')
-    parser.add_argument('--validation', '-v', dest='val', type=float, default=10.0,
-                        help='Percent of the data that is used as validation (0-100)')
     parser.add_argument('--amp', action='store_true', default=False, help='Use mixed precision')
     parser.add_argument('--bilinear', action='store_true', default=False, help='Use bilinear upsampling')
     parser.add_argument('--classes', '-c', type=int, default=2, help='Number of classes')
@@ -220,7 +230,6 @@ if __name__ == '__main__':
             learning_rate=args.lr,
             device=device,
             img_scale=args.scale,
-            val_percent=args.val / 100,
             amp=args.amp
         )
 
@@ -252,7 +261,6 @@ if __name__ == '__main__':
             learning_rate=args.lr,
             device=device,
             img_scale=args.scale,
-            val_percent=args.val / 100,
             amp=args.amp
         )
 
